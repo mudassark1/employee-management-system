@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
-import User from "../models/User.js";
+import { supabase } from "../config/db.js";
+import { fromRow, throwIfError } from "../utils/records.js";
 
 export async function authenticate(req, res, next) {
   const token = req.headers.authorization?.startsWith("Bearer ")
@@ -9,8 +10,12 @@ export async function authenticate(req, res, next) {
 
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(payload.sub).populate("employee");
+    const userRow = throwIfError(await supabase.from("users").select("*").eq("id", payload.sub).maybeSingle());
+    const user = userRow && fromRow(userRow);
     if (!user) return res.status(401).json({ message: "Your account is no longer available." });
+    user.employee = fromRow(throwIfError(
+      await supabase.from("employees").select("*").eq("user_id", user._id).maybeSingle()
+    ));
     if ((payload.sv ?? 0) !== user.sessionVersion) {
       return res.status(401).json({ message: "Your password has changed. Please sign in again." });
     }

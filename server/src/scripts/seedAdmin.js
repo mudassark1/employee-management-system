@@ -1,6 +1,7 @@
 import "dotenv/config";
-import { connectDatabase } from "../config/db.js";
-import User from "../models/User.js";
+import bcrypt from "bcryptjs";
+import { connectDatabase, supabase } from "../config/db.js";
+import { throwIfError } from "../utils/records.js";
 
 try {
   await connectDatabase();
@@ -10,18 +11,20 @@ try {
   if (!name || !email || !password || password.length < 8) {
     throw new Error("Set ADMIN_NAME, ADMIN_EMAIL, and an ADMIN_PASSWORD of at least 8 characters in server/.env.");
   }
-  const existing = await User.findOne({ email });
+  const existing = throwIfError(await supabase.from("users").select("id").eq("email", email).maybeSingle());
   if (existing) {
     console.log(`An account already exists for ${email}; no changes made.`);
   } else {
-    await User.create({ name, email, password, role: "admin" });
+    throwIfError(await supabase.from("users").insert({
+      name,
+      email,
+      password_hash: await bcrypt.hash(password, 12),
+      role: "admin"
+    }));
     console.log(`Administrator created for ${email}.`);
   }
   process.exitCode = 0;
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;
-} finally {
-  const mongoose = await import("mongoose");
-  await mongoose.default.disconnect();
 }

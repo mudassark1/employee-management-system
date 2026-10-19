@@ -1,9 +1,10 @@
 import { Router } from "express";
+import bcrypt from "bcryptjs";
 import { z } from "zod";
-import Employee from "../models/Employee.js";
-import User from "../models/User.js";
+import { supabase } from "../config/db.js";
 import { authenticate, allowRoles } from "../middleware/auth.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { fromRow, throwIfError, toRow } from "../utils/records.js";
 
 const router = Router();
 const employeeInput = z.object({
@@ -27,12 +28,12 @@ router.use(authenticate);
 router.get(
   "/",
   asyncHandler(async (req, res) => {
-    const query = {};
+    let query = supabase.from("employees").select("*").order("created_at", { ascending: false });
     if (req.user.role === "employee") {
       if (!req.user.employee) return res.json({ employees: [] });
-      query._id = req.user.employee._id;
+      query = query.eq("id", req.user.employee._id);
     }
-    const employees = await Employee.find(query).sort({ createdAt: -1 });
+    const employees = fromRow(throwIfError(await query));
     res.json({ employees });
   })
 );
@@ -52,24 +53,30 @@ router.post(
     if (accountRole === "hr" && !accountPassword) {
       return res.status(400).json({ message: "An HR account requires a login password." });
     }
-    let employee;
+
+    let userId;
     if (accountPassword) {
-      const user = await User.create({
+      const passwordHash = await bcrypt.hash(accountPassword, 12);
+      const user = fromRow(throwIfError(await supabase.from("users").insert({
         name: `${profile.firstName} ${profile.lastName}`,
-        email: profile.email,
-        password: accountPassword,
+        email: profile.email.toLowerCase(),
+        password_hash: passwordHash,
         role: accountRole
-      });
-      try {
-        employee = await Employee.create({ ...profile, user: user._id });
-        user.employee = employee._id;
-        await user.save();
-      } catch (error) {
-        await User.findByIdAndDelete(user._id);
-        throw error;
-      }
-    } else {
-      employee = await Employee.create(profile);
+      }).select("*").single()));
+      userId = user._id;
+    }
+
+    let employee;
+    try {
+      employee = fromRow(throwIfError(await supabase.from("employees").insert({
+        ...toRow(profile),
+        email: profile.email.toLowerCase(),
+        employee_id: profile.employeeId.trim().toUpperCase(),
+        user_id: userId || null
+      }).select("*").single()));
+    } catch (error) {
+      if (userId) throwIfError(await supabase.from("users").delete().eq("id", userId));
+      throw error;
     }
     res.status(201).json({ employee });
   })
@@ -83,18 +90,20 @@ router.patch(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues.map((issue) => issue.message).join(" ") });
     }
-    const employee = await Employee.findByIdAndUpdate(req.params.id, parsed.data, {
-      new: true,
-      runValidators: true
-    });
+    const updates = toRow(parsed.data);
+    if (parsed.data.employeeId) updates.employee_id = parsed.data.employeeId.trim().toUpperCase();
+    if (parsed.data.email) updates.email = parsed.data.email.toLowerCase();
+
+    const employee = fromRow(throwIfError(await supabase.from("employees").update(updates)
+      .eq("id", req.params.id).select("*").maybeSingle()));
     if (!employee) return res.status(404).json({ message: "Employee not found." });
     if (employee.user && (parsed.data.firstName || parsed.data.lastName || parsed.data.email)) {
       const userUpdate = {};
       if (parsed.data.firstName || parsed.data.lastName) {
         userUpdate.name = `${parsed.data.firstName || employee.firstName} ${parsed.data.lastName || employee.lastName}`;
       }
-      if (parsed.data.email) userUpdate.email = parsed.data.email;
-      await User.findByIdAndUpdate(employee.user, userUpdate, { runValidators: true });
+      if (parsed.data.email) userUpdate.email = parsed.data.email.toLowerCase();
+      throwIfError(await supabase.from("users").update(userUpdate).eq("id", employee.user));
     }
     res.json({ employee });
   })
@@ -104,9 +113,10 @@ router.delete(
   "/:id",
   allowRoles("admin", "hr"),
   asyncHandler(async (req, res) => {
-    const employee = await Employee.findByIdAndDelete(req.params.id);
+    const employee = fromRow(throwIfError(await supabase.from("employees").delete()
+      .eq("id", req.params.id).select("*").maybeSingle()));
     if (!employee) return res.status(404).json({ message: "Employee not found." });
-    if (employee.user) await User.findByIdAndDelete(employee.user);
+    if (employee.user) throwIfError(await supabase.from("users").delete().eq("id", employee.user));
     res.json({ message: "Employee and linked account removed." });
   })
 );

@@ -1,11 +1,11 @@
 # PeopleOS — Employee Management System
 
-A full-stack employee management starter built with React, Express, and MongoDB. It includes protected sign-in, role-aware workspaces, employee records, attendance, leave requests, and an at-a-glance dashboard.
+A full-stack employee management starter built with React, Express, and Supabase Postgres. It includes protected sign-in, role-aware workspaces, employee records, attendance, leave requests, and an at-a-glance dashboard.
 
 ## Requirements
 
 - Node.js 20.11 or newer
-- MongoDB running locally, or a MongoDB Atlas connection string
+- A Supabase project
 
 ## Quick start
 
@@ -15,7 +15,7 @@ A full-stack employee management starter built with React, Express, and MongoDB.
    Copy-Item server\.env.example server\.env
    ```
 
-2. Edit `server\.env` and set `MONGODB_URI` and a unique `JWT_SECRET` of at least 32 characters. Set the initial admin name, email, and password as well. To enable forgot-password emails, configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM` with credentials from your email provider. `CLIENT_URL` must be the public web-app URL where users will reset their passwords. Do not use example credentials outside local development.
+2. In your Supabase project, open **SQL Editor** and run [`server/supabase/schema.sql`](server/supabase/schema.sql). Then edit `server\.env` with the Supabase project URL and its **service role key** (`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`) and a unique `JWT_SECRET` of at least 32 characters. Keep the service role key secret and only use it on the backend. Set the initial admin name, email, and password as well. To enable forgot-password emails, configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM` with credentials from your email provider. `CLIENT_URL` must be the public web-app URL where users will reset their passwords. Do not use example credentials outside local development.
 
    For Gmail, enable 2-Step Verification and create a Google App Password (do not use your regular Gmail password), then set:
 
@@ -53,7 +53,7 @@ A full-stack employee management starter built with React, Express, and MongoDB.
 
 6. Open [http://localhost:5173](http://localhost:5173) and sign in with the admin credentials configured in `server\.env`.
 
-The API runs on `http://localhost:5000`; the Vite development server proxies `/api` requests to it. To use MongoDB Atlas, replace the local URI with your Atlas connection string. Ensure the database user and network access are configured in Atlas.
+The API runs on `http://localhost:5000`; the Vite development server proxies `/api` requests to it. The API connects to Supabase using the backend service role key; Row Level Security is enabled for the application tables, so do not expose this key in frontend code.
 
 ## Features
 

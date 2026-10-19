@@ -1,35 +1,59 @@
 import { Router } from "express";
-import Employee from "../models/Employee.js";
-import Attendance from "../models/Attendance.js";
-import LeaveRequest from "../models/LeaveRequest.js";
+import { supabase } from "../config/db.js";
 import { authenticate } from "../middleware/auth.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { fromRow } from "../utils/records.js";
 
 const router = Router();
 router.get(
   "/",
   authenticate,
   asyncHandler(async (req, res) => {
-    const employeeFilter = req.user.role === "employee" && req.user.employee
-      ? { _id: req.user.employee._id }
-      : req.user.role === "employee" ? { _id: null } : {};
-    const attendanceFilter = req.user.role === "employee" && req.user.employee
-      ? { employee: req.user.employee._id }
-      : req.user.role === "employee" ? { employee: null } : {};
-    const [totalEmployees, activeEmployees, pendingLeaves, todayAttendance, recentLeaves] = await Promise.all([
-      Employee.countDocuments(employeeFilter),
-      Employee.countDocuments({ ...employeeFilter, status: "Active" }),
-      LeaveRequest.countDocuments({
-        ...(req.user.role === "employee" ? attendanceFilter : {}),
-        status: "Pending"
-      }),
-      Attendance.countDocuments({ ...attendanceFilter, date: new Date().toISOString().slice(0, 10) }),
-      LeaveRequest.find(req.user.role === "employee" ? attendanceFilter : {})
-        .populate("employee", "firstName lastName employeeId department")
-        .sort({ createdAt: -1 })
-        .limit(5)
+    const employeeId = req.user.role === "employee" ? req.user.employee?._id : null;
+    const today = new Date().toISOString().slice(0, 10);
+    let employeesQuery = supabase.from("employees").select("id", { count: "exact", head: true });
+    let activeEmployeesQuery = supabase.from("employees").select("id", { count: "exact", head: true }).eq("status", "Active");
+    let pendingLeavesQuery = supabase.from("leave_requests").select("id", { count: "exact", head: true }).eq("status", "Pending");
+    let todayAttendanceQuery = supabase.from("attendance").select("id", { count: "exact", head: true }).eq("date", today);
+    let recentLeavesQuery = supabase.from("leave_requests")
+      .select("*, employee:employees(id,employee_id,first_name,last_name,department)")
+      .order("created_at", { ascending: false })
+      .limit(5);
+
+    if (req.user.role === "employee") {
+      if (employeeId) {
+        employeesQuery = employeesQuery.eq("id", employeeId);
+        activeEmployeesQuery = activeEmployeesQuery.eq("id", employeeId);
+        pendingLeavesQuery = pendingLeavesQuery.eq("employee_id", employeeId);
+        todayAttendanceQuery = todayAttendanceQuery.eq("employee_id", employeeId);
+        recentLeavesQuery = recentLeavesQuery.eq("employee_id", employeeId);
+      } else {
+        return res.json({
+          stats: { totalEmployees: 0, activeEmployees: 0, pendingLeaves: 0, todayAttendance: 0 },
+          recentLeaves: []
+        });
+      }
+    }
+
+    const [employeesResult, activeResult, pendingResult, attendanceResult, leavesResult] = await Promise.all([
+      employeesQuery,
+      activeEmployeesQuery,
+      pendingLeavesQuery,
+      todayAttendanceQuery,
+      recentLeavesQuery
     ]);
-    res.json({ stats: { totalEmployees, activeEmployees, pendingLeaves, todayAttendance }, recentLeaves });
+    for (const result of [employeesResult, activeResult, pendingResult, attendanceResult, leavesResult]) {
+      if (result.error) throw result.error;
+    }
+    res.json({
+      stats: {
+        totalEmployees: employeesResult.count || 0,
+        activeEmployees: activeResult.count || 0,
+        pendingLeaves: pendingResult.count || 0,
+        todayAttendance: attendanceResult.count || 0
+      },
+      recentLeaves: fromRow(leavesResult.data)
+    });
   })
 );
 

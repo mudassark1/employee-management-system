@@ -4,9 +4,10 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
 import { z } from "zod";
-import User from "../models/User.js";
+import { supabase } from "../config/db.js";
 import { authenticate } from "../middleware/auth.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { fromRow, throwIfError } from "../utils/records.js";
 
 const router = Router();
 const loginSchema = z.object({
@@ -22,6 +23,15 @@ const resetEmailMessage = "If an account exists for that email, password reset i
 
 function hashResetToken(token) {
   return createHash("sha256").update(token).digest("hex");
+}
+
+async function getUserWithEmployee(userRow) {
+  if (!userRow) return null;
+  const user = fromRow(userRow);
+  user.employee = fromRow(throwIfError(
+    await supabase.from("employees").select("*").eq("user_id", user._id).maybeSingle()
+  ));
+  return user;
 }
 
 function publicUser(user) {
@@ -40,15 +50,15 @@ router.post(
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: "Enter a valid email and password." });
 
-    const user = await User.findOne({ email: parsed.data.email.toLowerCase() })
-      .select("+password")
-      .populate("employee");
-    if (!user || !(await user.comparePassword(parsed.data.password))) {
+    const userRow = throwIfError(await supabase.from("users").select("*")
+      .eq("email", parsed.data.email.toLowerCase()).maybeSingle());
+    const user = await getUserWithEmployee(userRow);
+    if (!user || !(await bcrypt.compare(parsed.data.password, user.passwordHash))) {
       return res.status(401).json({ message: "Email or password is incorrect." });
     }
 
     const token = jwt.sign(
-      { sub: user._id.toString(), sv: user.sessionVersion },
+      { sub: user._id, sv: user.sessionVersion },
       process.env.JWT_SECRET,
       { expiresIn: "12h" }
     );
@@ -79,13 +89,16 @@ router.post(
       });
     }
 
-    const user = await User.findOne({ email: parsed.data.email.toLowerCase() });
+    const user = throwIfError(await supabase.from("users").select("id,email")
+      .eq("email", parsed.data.email.toLowerCase()).maybeSingle());
     if (!user) return res.json({ message: resetEmailMessage });
 
     const rawToken = randomBytes(32).toString("hex");
-    user.resetPasswordToken = hashResetToken(rawToken);
-    user.resetPasswordExpires = new Date(Date.now() + 60 * 60 * 1000);
-    await user.save();
+    const hashedToken = hashResetToken(rawToken);
+    throwIfError(await supabase.from("users").update({
+      reset_password_token: hashedToken,
+      reset_password_expires: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    }).eq("id", user.id));
 
     resetUrl.searchParams.set("resetToken", rawToken);
     const transporter = nodemailer.createTransport({
@@ -104,10 +117,10 @@ router.post(
         html: `<p>A password reset was requested for your PeopleOS account.</p><p><a href="${resetUrl.href}">Choose a new password</a></p><p>This link expires in one hour. If you did not request this, you can ignore this email.</p>`
       });
     } catch (error) {
-      await User.updateOne(
-        { _id: user._id, resetPasswordToken: hashResetToken(rawToken) },
-        { $unset: { resetPasswordToken: 1, resetPasswordExpires: 1 } }
-      );
+      throwIfError(await supabase.from("users").update({
+        reset_password_token: null,
+        reset_password_expires: null
+      }).eq("id", user.id).eq("reset_password_token", hashedToken));
       error.status = 503;
       error.message = "The reset email could not be sent. Please try again later or contact your administrator.";
       throw error;
@@ -126,17 +139,23 @@ router.post(
     }
 
     const hashedToken = hashResetToken(parsed.data.token);
-    const password = await bcrypt.hash(parsed.data.password, 12);
-    const result = await User.updateOne(
-      { resetPasswordToken: hashedToken, resetPasswordExpires: { $gt: new Date() } },
-      {
-        $set: { password },
-        $inc: { sessionVersion: 1 },
-        $unset: { resetPasswordToken: 1, resetPasswordExpires: 1 }
-      }
-    );
-
-    if (result.modifiedCount !== 1) {
+    const passwordHash = await bcrypt.hash(parsed.data.password, 12);
+    const user = throwIfError(await supabase.from("users").select("id,session_version")
+      .eq("reset_password_token", hashedToken)
+      .gt("reset_password_expires", new Date().toISOString())
+      .maybeSingle());
+    if (!user) {
+      return res.status(400).json({ message: "This password reset link is invalid or has expired. Request a new one." });
+    }
+    const updated = throwIfError(await supabase.from("users").update({
+      password_hash: passwordHash,
+      session_version: user.session_version + 1,
+      reset_password_token: null,
+      reset_password_expires: null
+    }).eq("id", user.id).eq("reset_password_token", hashedToken)
+      .gt("reset_password_expires", new Date().toISOString())
+      .select("id"));
+    if (!updated.length) {
       return res.status(400).json({ message: "This password reset link is invalid or has expired. Request a new one." });
     }
     res.json({ message: "Your password has been reset. Sign in with your new password." });
